@@ -1,0 +1,244 @@
+package uy.edu.fing.tse.rest;
+
+import java.util.List;
+
+import javax.ejb.EJB;
+import javax.ejb.LocalBean;
+import javax.ejb.Stateless;
+import javax.servlet.http.HttpServletRequest;
+import javax.transaction.Transactional;
+import javax.ws.rs.Consumes;
+import javax.ws.rs.GET;
+import javax.ws.rs.POST;
+import javax.ws.rs.Path;
+import javax.ws.rs.PathParam;
+import javax.ws.rs.Produces;
+import javax.ws.rs.core.Context;
+import javax.ws.rs.core.MediaType;
+import javax.ws.rs.core.Response;
+import javax.ws.rs.core.Response.Status;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+import uy.edu.fing.tse.authentication.JWTManager;
+import uy.edu.fing.tse.authentication.PasswordManager;
+import uy.edu.fing.tse.persistence.model.Fact;
+import uy.edu.fing.tse.persistence.model.Role;
+import uy.edu.fing.tse.persistence.model.Role.UserRoles;
+import uy.edu.fing.tse.persistence.model.User;
+import uy.edu.fing.tse.rest.annotations.JWTAuthorization;
+import uy.edu.fing.tse.rest.filters.JWTAuthorizationFilter;
+import uy.edu.fing.tse.rest.requests.AppAccessTokenFB;
+import uy.edu.fing.tse.rest.requests.LoginWithFacebook;
+import uy.edu.fing.tse.rest.requests.LoginWithPassword;
+import uy.edu.fing.tse.rest.requests.SetUserRoles;
+import uy.edu.fing.tse.rest.requests.UserCreation;
+import uy.edu.fing.tse.rest.requests.UsuarioAccessTokenFB;
+import uy.edu.fing.tse.rest.responses.FactList;
+import uy.edu.fing.tse.rest.responses.GenericMessage;
+import uy.edu.fing.tse.rest.responses.Login;
+import uy.edu.fing.tse.rest.responses.RoleList;
+import uy.edu.fing.tse.rest.responses.UserDTO;
+import uy.edu.fing.tse.rest.responses.errors.InternalServerErrorMessage;
+import uy.edu.fing.tse.rest.responses.errors.UnknownUserMessage;
+import uy.edu.fing.tse.rest.util.FacebookUtils;
+import uy.edu.fing.tse.users.UsersBean;
+import uy.edu.fing.tse.users.exceptions.UnknownRoleException;
+
+@Stateless
+@LocalBean
+@Path("/users")
+@Produces(MediaType.APPLICATION_JSON)
+public class UsersService {
+
+	private static final Logger logger = LogManager.getLogger(UsersService.class);
+
+	@EJB JWTManager tokenGenerator;
+	@EJB UsersBean usersBean;
+	@EJB PasswordManager passwordManager;
+
+	@POST
+	@Path("/login")
+	@Consumes(MediaType.APPLICATION_JSON)
+	public Response loginWithPassword(LoginWithPassword login) {
+		try {
+			User user = usersBean.getUserByUsername(login.getUsername());
+
+			if (!usersBean.loginUser(user, login.getPassword())) {
+				return Response.status(Status.UNAUTHORIZED).build();
+			}
+
+			logger.error("Login by user {}", user);
+			String token = tokenGenerator.createJWTUserToken(user.getId());
+
+			return Response.ok().entity(new Login(user, token)).build();
+		} catch (Exception e) {
+			logger.error("", e);
+			return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(new InternalServerErrorMessage()).build();
+		}
+	}
+	
+	@POST
+	@Path("/loginfacebook")
+	@Consumes(MediaType.APPLICATION_JSON)
+	public Response loginWithFacebook(LoginWithFacebook login) {
+		try {
+			FacebookUtils facebookUtils = new FacebookUtils();
+			
+			AppAccessTokenFB appAccessTokenFB = facebookUtils.obtenerAppToken();
+			
+			UsuarioAccessTokenFB usuarioAccessToken = facebookUtils.validarLogin(
+					login.getAccessToken(),
+					appAccessTokenFB.getAccessToken());
+			
+			facebookUtils.getDatosUsuario(usuarioAccessToken.getUserId(), login.getAccessToken());
+			
+			/*User user = usersBean.getUserByUsername(login.getUsername());
+
+			if (!usersBean.loginUser(user, login.getPassword())) {
+				return Response.status(Status.UNAUTHORIZED).build();
+			}
+
+			logger.error("Login by user {}", user);
+			String token = tokenGenerator.createJWTUserToken(user.getId());
+
+			return Response.ok().entity(new Login(user, token)).build();*/
+			return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(new InternalServerErrorMessage()).build();
+
+		} catch (Exception e) {
+			logger.error("", e);
+			return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(new InternalServerErrorMessage()).build();
+		}
+	}
+
+
+	@POST
+	@Consumes(MediaType.APPLICATION_JSON)
+	@Transactional
+	@JWTAuthorization(UserRoles.ADMIN)
+	public Response createUser(@Context HttpServletRequest httpServletRequest, UserCreation userCreation) {
+		try {
+			Integer userId = (Integer) httpServletRequest.getAttribute(JWTAuthorizationFilter.REQUEST_USER_ATTRIBUTE);
+			logger.info("createUser called by user {}", userId);
+
+			User user = usersBean.createUser(userCreation.getUsername(), userCreation.getEmail(), userCreation.getPassword());
+
+			return Response.ok().entity(new UserDTO(user)).build();
+		} catch (Exception e) {
+			logger.error("", e);
+			return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(new InternalServerErrorMessage()).build();
+		}
+	}
+
+
+	@GET
+	@Path("/facts/created")
+	@Transactional
+	@JWTAuthorization({UserRoles.ADMIN, UserRoles.SUBMITTER, UserRoles.CHECKER, UserRoles.CITIZEN})
+	public Response getCreatedFacts(@Context HttpServletRequest httpServletRequest) {
+		try {
+			Integer userId = (Integer) httpServletRequest.getAttribute(JWTAuthorizationFilter.REQUEST_USER_ATTRIBUTE);
+			logger.info("createUser called by user {}", userId);
+
+			User loggedInUser = usersBean.getUserById(userId);
+
+			List<Fact> createdFacts = loggedInUser.getCreatedFacts();
+
+			return Response.ok().entity(new FactList(createdFacts)).build();
+		} catch (Exception e) {
+			logger.error("", e);
+			return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(new InternalServerErrorMessage()).build();
+		}
+	}
+
+
+	@GET
+	@Path("/")
+	@Transactional
+	@JWTAuthorization({UserRoles.ADMIN, UserRoles.SUBMITTER, UserRoles.CHECKER, UserRoles.CITIZEN})
+	public Response getLoggedInUser(@Context HttpServletRequest httpServletRequest) {
+		try {
+			Integer userId = (Integer) httpServletRequest.getAttribute(JWTAuthorizationFilter.REQUEST_USER_ATTRIBUTE);
+			logger.info("getLoggedInUser called by user {}", userId);
+
+			User loggedInUser = usersBean.getUserById(userId);
+
+			return Response.ok().entity(new UserDTO(loggedInUser)).build();
+		} catch (Exception e) {
+			logger.error("", e);
+			return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(new InternalServerErrorMessage()).build();
+		}
+	}
+
+	@GET
+	@Path("/{userId}")
+	@Transactional
+	@JWTAuthorization({UserRoles.ADMIN})
+	public Response getUserInfo(@Context HttpServletRequest httpServletRequest, @PathParam("userId") Integer userId) {
+		try {
+			Integer loggedInUserId = (Integer) httpServletRequest.getAttribute(JWTAuthorizationFilter.REQUEST_USER_ATTRIBUTE);
+			logger.info("getUserInfo called by user {}", loggedInUserId);
+
+			User user = usersBean.getUserById(userId);
+			if (user == null) {
+				return Response.status(Response.Status.NOT_FOUND).entity(new UnknownUserMessage(userId)).build();
+			}
+
+			return Response.ok().entity(new UserDTO(user)).build();
+		} catch (Exception e) {
+			logger.error("", e);
+			return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(new InternalServerErrorMessage()).build();
+		}
+	}
+
+	@GET
+	@Path("/{userId}/roles")
+	@Transactional
+	@JWTAuthorization({UserRoles.ADMIN})
+	public Response getUserRoles(@Context HttpServletRequest httpServletRequest, @PathParam("userId") Integer userId) {
+		try {
+			Integer loggedInUserId = (Integer) httpServletRequest.getAttribute(JWTAuthorizationFilter.REQUEST_USER_ATTRIBUTE);
+			logger.info("getUserRoles called by user {}", loggedInUserId);
+
+			User user = usersBean.getUserById(userId);
+			if (user == null) {
+				return Response.status(Response.Status.NOT_FOUND).entity(new UnknownUserMessage(userId)).build();
+			}
+
+			List<Role> userRoles = user.getRoles();
+
+			return Response.ok().entity(new RoleList(userRoles)).build();
+		} catch (Exception e) {
+			logger.error("", e);
+			return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(new InternalServerErrorMessage()).build();
+		}
+	}
+
+	@POST
+	@Path("/{userId}/roles")
+	@Consumes(MediaType.APPLICATION_JSON)
+	@Transactional
+	@JWTAuthorization({UserRoles.ADMIN})
+	public Response setUserRoles(@Context HttpServletRequest httpServletRequest, SetUserRoles setUserRoles, @PathParam("userId") Integer userId) {
+		try {
+			Integer loggedInUserId = (Integer) httpServletRequest.getAttribute(JWTAuthorizationFilter.REQUEST_USER_ATTRIBUTE);
+			logger.info("getUserRoles called by user {}", loggedInUserId);
+
+			User user = usersBean.getUserById(userId);
+			if (user == null) {
+				return Response.status(Response.Status.NOT_FOUND).entity(new UnknownUserMessage(userId)).build();
+			}
+
+			usersBean.update(user, setUserRoles.getRoles());
+
+			return Response.ok().entity(new GenericMessage("Ok")).build();
+		} catch (UnknownRoleException e) {
+			logger.error("", e);
+			return Response.status(Response.Status.BAD_REQUEST).entity(new GenericMessage(e.getMessage())).build();
+		} catch (Exception e) {
+			logger.error("", e);
+			return Response.status(Response.Status.INTERNAL_SERVER_ERROR).entity(new InternalServerErrorMessage()).build();
+		}
+	}
+}
